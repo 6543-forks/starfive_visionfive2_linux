@@ -481,7 +481,10 @@ struct cdns_dsi {
 	struct reset_control *sys_rst;
 	struct reset_control *txbytehs_rst;
 	struct reset_control *txesc_rst;
+	int irq;
 };
+
+static int cdns_check_register_access(struct cdns_dsi *dsi);
 
 //clk op func----------//
 static int  cdns_dsi_clock_enable(struct cdns_dsi *dsi, struct device *dev)
@@ -745,12 +748,7 @@ static int cdns_dsi_mode2cfg(struct cdns_dsi *dsi,
 					 bpp, DSI_HFP_FRAME_OVERHEAD);
 	//dpi to dsi transfer can not match , reconfig those parms for waveshare
 	//for taobao old mipi panel .should change here : hsa 36 , hbp 108, hfp 288
-	if (mode->vdisplay == 1280) {
-		dsi_cfg->hsa = 45-DSI_HSA_FRAME_OVERHEAD;
-		dsi_cfg->hbp = 134-DSI_HBP_FRAME_OVERHEAD;
-		dsi_cfg->hfp = 356-DSI_HFP_FRAME_OVERHEAD;
-	}
-	if (mode->vdisplay == 480) {
+	if (mode->hdisplay == 800) {
 		dsi_cfg->hsa = 117-DSI_HSA_FRAME_OVERHEAD;
 		dsi_cfg->hbp = 115-DSI_HBP_FRAME_OVERHEAD;
 		dsi_cfg->hfp = 209-DSI_HFP_FRAME_OVERHEAD;
@@ -797,7 +795,7 @@ static int cdns_dsi_adjust_phy_config(struct cdns_dsi *dsi,
 	dpi_htotal = mode_valid_check ? mode->htotal : mode->crtc_htotal;
 
 	/* data rate was in bytes/sec, convert to bits/sec. */
-	phy_cfg->hs_clk_rate = output->phy_opts.mipi_dphy.hs_clk_rate;
+	phy_cfg->hs_clk_rate = 750000000;
 
 	dsi_hfp_ext = adj_dsi_htotal - dsi_htotal;
 	dsi_cfg->hfp += dsi_hfp_ext;
@@ -834,15 +832,7 @@ static int cdns_dsi_check_conf(struct cdns_dsi *dsi,
 	if (ret)
 		return ret;
 
-	//phy_cfg->hs_clk_rate = output->phy_opts.mipi_dphy.hs_clk_rate;
-	if (mode->vdisplay == 480)
-		phy_cfg->hs_clk_rate = 750000000;
-	else if (mode->vdisplay == 1280)
-		phy_cfg->hs_clk_rate = 490000000;
-
-	dsi_cfg->htotal = dsi_cfg->hsa + DSI_HSA_FRAME_OVERHEAD +
-			  			dsi_cfg->hbp + DSI_HBP_FRAME_OVERHEAD +
-			  			dsi_cfg->hfp + DSI_HFP_FRAME_OVERHEAD + dsi_cfg->hact;
+	phy_cfg->hs_clk_rate = 750000000;
 
 	dsi_hss_hsa_hse_hbp = dsi_cfg->hbp + DSI_HBP_FRAME_OVERHEAD;
 	if (output->dev->mode_flags & MIPI_DSI_MODE_VIDEO_SYNC_PULSE)
@@ -953,7 +943,6 @@ static void cdns_dsi_bridge_disable(struct drm_bridge *bridge)
 	struct cdns_dsi_input *input = bridge_to_cdns_dsi_input(bridge);
 	struct cdns_dsi *dsi = input_to_dsi(input);
 	u32 val;
-	int ret;
 
 	dsi->link_initialized = false;
 	val = readl(dsi->regs + MCTL_MAIN_DATA_CTL);
@@ -968,10 +957,6 @@ static void cdns_dsi_bridge_disable(struct drm_bridge *bridge)
 	phy_power_off(dsi->dphy);
 	phy_exit(dsi->dphy);
 
-	ret = cdns_dsi_resets_assert(dsi, dsi->base.dev);
-	if (ret < 0)
-		dev_err(dsi->base.dev, "failed to assert reset\n");
-	cdns_dsi_clock_disable(dsi);
 }
 
 static void cdns_dsi_hs_init(struct cdns_dsi *dsi)
@@ -983,10 +968,9 @@ static void cdns_dsi_hs_init(struct cdns_dsi *dsi)
 	 * Power all internal DPHY blocks down and maintain their reset line
 	 * asserted before changing the DPHY config.
 	 */
-	//writel(DPHY_CMN_PSO | DPHY_PLL_PSO | DPHY_ALL_D_PDN | DPHY_C_PDN |
-	//       DPHY_CMN_PDN | DPHY_PLL_PDN,
-	//       dsi->regs + MCTL_DPHY_CFG0);
-	// Commented by Tony Ren: this is not appliable for our case as it is intended for its own dphy
+	writel(DPHY_CMN_PSO | DPHY_PLL_PSO | DPHY_ALL_D_PDN | DPHY_C_PDN |
+	       DPHY_CMN_PDN | DPHY_PLL_PDN,
+	       dsi->regs + MCTL_DPHY_CFG0);
 
 	phy_init(dsi->dphy);
 	phy_set_mode(dsi->dphy, PHY_MODE_MIPI_DPHY);
@@ -994,7 +978,7 @@ static void cdns_dsi_hs_init(struct cdns_dsi *dsi)
 	phy_power_on(dsi->dphy);
 
 	ret = sys_mipi_dsi_set_ppi_txbyte_hs(1, dsi);
-#if 0
+
 	writel(PLL_LOCKED, dsi->regs + MCTL_MAIN_STS_CLR);
 	writel(DPHY_CMN_PSO | DPHY_ALL_D_PDN | DPHY_C_PDN | DPHY_CMN_PDN,
 	       dsi->regs + MCTL_DPHY_CFG0);
@@ -1003,7 +987,7 @@ static void cdns_dsi_hs_init(struct cdns_dsi *dsi)
 	writel(DPHY_CMN_PSO | DPHY_ALL_D_PDN | DPHY_C_PDN | DPHY_CMN_PDN |
 	       DPHY_D_RSTB(output->dev->lanes) | DPHY_C_RSTB,
 	       dsi->regs + MCTL_DPHY_CFG0);
-#endif
+
 /*
 	dpi_fifo_int = readl(dsi->regs + DPI_IRQ_CLR);
 	if (dpi_fifo_int)
@@ -1014,7 +998,7 @@ static void cdns_dsi_hs_init(struct cdns_dsi *dsi)
 static void cdns_dsi_init_link(struct cdns_dsi *dsi)
 {
 	struct cdns_dsi_output *output = &dsi->output;
-	unsigned long  ulpout;
+	unsigned long sysclk_period, ulpout;
 	u32 val;
 	int i;
 
@@ -1031,57 +1015,22 @@ static void cdns_dsi_init_link(struct cdns_dsi *dsi)
 
 	writel(val, dsi->regs + MCTL_MAIN_PHY_CTL);
 
-	ulpout = DIV_ROUND_UP(clk_get_rate(dsi->dsi_sys_clk), MSEC_PER_SEC);
-
+	/* ULPOUT should be set to 1ms and is expressed in sysclk cycles.*/
+	sysclk_period = NSEC_PER_SEC / clk_get_rate(dsi->dsi_sys_clk);
+	ulpout = DIV_ROUND_UP(NSEC_PER_MSEC, sysclk_period);
 	writel(CLK_LANE_ULPOUT_TIME(ulpout) | DATA_LANE_ULPOUT_TIME(ulpout),
 		dsi->regs + MCTL_ULPOUT_TIME);
 
 	writel(LINK_EN, dsi->regs + MCTL_MAIN_DATA_CTL);
 
-	val = CLK_LANE_EN | CLK_FORCE_STOP ; // | PLL_START; unused bit
+	val = CLK_LANE_EN | PLL_START;
 	for (i = 0; i < output->dev->lanes; i++)
 		val |= DATA_LANE_START(i);
 
 	writel(val, dsi->regs + MCTL_MAIN_EN);
-	udelay(20);
 
 	dsi->link_initialized = true;
 
-}
-
-static void start_clane_hs(struct cdns_dsi *dsi)
-{
-	// struct cdns_dsi *dsi = (struct cdns_dsi *)handle->priv;
-	struct cdns_dsi_output *output = &dsi->output;
-
-	unsigned long  ulpout;
-	u32 val;
-	int i;
-
-	val = WAIT_BURST_TIME(0xf);
-	for (i = 1; i < output->dev->lanes; i++)
-		val |= DATA_LANE_EN(i);
-
-	if (!(output->dev->mode_flags & MIPI_DSI_CLOCK_NON_CONTINUOUS))
-		val |= CLK_CONTINUOUS;
-
-	writel(val, dsi->regs + MCTL_MAIN_PHY_CTL);
-
-	ulpout = DIV_ROUND_UP(clk_get_rate(dsi->dsi_sys_clk), MSEC_PER_SEC);
-	writel(CLK_LANE_ULPOUT_TIME(ulpout) | DATA_LANE_ULPOUT_TIME(ulpout),
-	       dsi->regs + MCTL_ULPOUT_TIME);
-
-	writel(LINK_EN, dsi->regs + MCTL_MAIN_DATA_CTL);
-
-	val = CLK_LANE_EN; // | CLK_FORCE_STOP; // | PLL_START; unused bit
-	for (i = 0; i < output->dev->lanes; i++)
-		val |= DATA_LANE_START(i);
-
-	writel(val, dsi->regs + MCTL_MAIN_EN); // start hs clk lane
-
-	// clane output DDR(Double Data Rate) clock = half of dphy hs_rate, because hs is double edge sampling
-
-	dsi->link_initialized = true;
 }
 
 static void cdns_dsi_bridge_enable(struct drm_bridge *bridge)
@@ -1097,18 +1046,6 @@ static void cdns_dsi_bridge_enable(struct drm_bridge *bridge)
 	int nlanes;
 	int vrefresh;
 	u32 div;
-	int ret;
-
-	ret = cdns_dsi_clock_enable(dsi, dsi->base.dev);
-	if (ret) {
-		dev_err(dsi->base.dev, "failed to enable clock\n");
-		return;
-	}
-	ret = cdns_dsi_resets_deassert(dsi, dsi->base.dev);
-	if (ret < 0) {
-		dev_err(dsi->base.dev, "failed to deassert reset\n");
-		return;
-	}
 
 	if (WARN_ON(pm_runtime_get_sync(dsi->base.dev) < 0))
 		return;
@@ -1118,14 +1055,9 @@ static void cdns_dsi_bridge_enable(struct drm_bridge *bridge)
 
 	//WARN_ON_ONCE(cdns_dsi_check_conf(dsi, mode, &dsi_cfg, false));//original //7110 mode illegal,need confirm //cannot disable
 	cdns_dsi_check_conf(dsi, mode, &dsi_cfg, false);
+
 	cdns_dsi_hs_init(dsi);
 	cdns_dsi_init_link(dsi);
-
-	if (output->panel)
-		drm_panel_prepare(output->panel);
-
-	if (output->panel)
-		drm_panel_enable(output->panel);
 
 	writel(HBP_LEN(dsi_cfg.hbp) | HSA_LEN(dsi_cfg.hsa),
 	       dsi->regs + VID_HSIZE1);
@@ -1162,11 +1094,10 @@ static void cdns_dsi_bridge_enable(struct drm_bridge *bridge)
 	tx_byte_period = DIV_ROUND_DOWN_ULL((u64)NSEC_PER_SEC * 8,
 					    phy_cfg->hs_clk_rate);
 	reg_wakeup = (phy_cfg->hs_prepare + phy_cfg->hs_zero) / tx_byte_period;
-
 	writel(REG_WAKEUP_TIME(reg_wakeup) | REG_LINE_DURATION(tmp),
 	       dsi->regs + VID_DPHY_TIME);
 
-    vrefresh = drm_mode_vrefresh(mode)-1;//display_timing_vrefresh(dpi);
+    vrefresh = drm_mode_vrefresh(mode);//display_timing_vrefresh(dpi);
 
     tmp = NSEC_PER_SEC / vrefresh;
 	tmp /= tx_byte_period;
@@ -1223,9 +1154,6 @@ static void cdns_dsi_bridge_enable(struct drm_bridge *bridge)
 		writel(tmp, dsi->regs + VID_MAIN_CTL);
 	}
 
-	//to restart the clane and dlane
-	start_clane_hs(dsi);
-
 	tmp = readl(dsi->regs + MCTL_MAIN_DATA_CTL);
 	tmp &= ~(IF_VID_SELECT_MASK | HOST_EOT_GEN | IF_VID_MODE);
 
@@ -1239,7 +1167,6 @@ static void cdns_dsi_bridge_enable(struct drm_bridge *bridge)
 
 	tmp = readl(dsi->regs + MCTL_MAIN_EN) | IF_EN(input->id);
 	writel(tmp, dsi->regs + MCTL_MAIN_EN);
-
 }
 
 static const struct drm_bridge_funcs cdns_dsi_bridge_funcs = {
@@ -1280,7 +1207,6 @@ static int cdns_dsi_attach(struct mipi_dsi_host *host,
 	 */
 	np = of_graph_get_remote_node(dsi->base.dev->of_node, DSI_OUTPUT_PORT,
 				      dev->channel);
-
 	if (!np)
 		np = of_node_get(dev->dev.of_node);
 
@@ -1348,17 +1274,20 @@ static irqreturn_t cdns_dsi_interrupt(int irq, void *data)
 	return ret;
 }
 
-
-
 static ssize_t cdns_dsi_transfer(struct mipi_dsi_host *host,
 				 const struct mipi_dsi_msg *msg)
 {
 	struct cdns_dsi *dsi = to_cdns_dsi(host);
-	u32 cmd, sts, val, wait = WRITE_COMPLETED, ctl = 0;
+	u32 cmd, val, wait = WRITE_COMPLETED, ctl = 0;
 	struct mipi_dsi_packet packet;
 	int ret, i, tx_len, rx_len;
+	u32 stat = 0;
+	int timeout = 100;
+	int stat_88;
+	int stat_188;
+	int stat_88_ack_val;
 
-	ret = pm_runtime_resume_and_get(host->dev);
+	ret = pm_runtime_get_sync(host->dev);
 	if (ret < 0)
 		return ret;
 
@@ -1373,19 +1302,19 @@ static ssize_t cdns_dsi_transfer(struct mipi_dsi_host *host,
 
 	/* For read operations, the maximum TX len is 2. */
 	if (rx_len && tx_len > 2) {
-		ret = -ENOTSUPP;
+		ret = -EOPNOTSUPP;
 		goto out;
 	}
 
 	/* TX len is limited by the CMD FIFO depth. */
 	if (tx_len > dsi->direct_cmd_fifo_depth) {
-		ret = -ENOTSUPP;
+		ret = -EOPNOTSUPP;
 		goto out;
 	}
 
 	/* RX len is limited by the RX FIFO depth. */
 	if (rx_len > dsi->rx_fifo_depth) {
-		ret = -ENOTSUPP;
+		ret = -EOPNOTSUPP;
 		goto out;
 	}
 
@@ -1408,10 +1337,11 @@ static ssize_t cdns_dsi_transfer(struct mipi_dsi_host *host,
 		ctl = BTA_EN;
 	}
 
-	writel(readl(dsi->regs + MCTL_MAIN_DATA_CTL) | ctl,
-		   dsi->regs + MCTL_MAIN_DATA_CTL);
+	/* Clear status flags before sending the command. */
 
-	writel(cmd, dsi->regs + DIRECT_CMD_MAIN_SETTINGS);
+	iowrite32(wait, dsi->regs + DIRECT_CMD_STS_CLR);
+	iowrite32(wait, dsi->regs + DIRECT_CMD_STS_CTL);
+	iowrite32(cmd, dsi->regs + DIRECT_CMD_MAIN_SETTINGS);
 
 	for (i = 0; i < tx_len; i += 4) {
 		const u8 *buf = msg->tx_buf;
@@ -1420,46 +1350,24 @@ static ssize_t cdns_dsi_transfer(struct mipi_dsi_host *host,
 		val = 0;
 		for (j = 0; j < 4 && j + i < tx_len; j++)
 			val |= (u32)buf[i + j] << (8 * j);
-
-		writel(val, dsi->regs + DIRECT_CMD_WRDATA);
+		iowrite32(val, dsi->regs + DIRECT_CMD_WRDATA);
 	}
+	iowrite32(0, dsi->regs + DIRECT_CMD_SEND);
 
-	/* Clear status flags before sending the command. */
-	writel(wait, dsi->regs + DIRECT_CMD_STS_CLR);
-	writel(wait, dsi->regs + DIRECT_CMD_STS_CTL);
-	reinit_completion(&dsi->direct_cmd_comp);
-	writel(0, dsi->regs + DIRECT_CMD_SEND);
+	do {
+		stat = readl(dsi->regs + DIRECT_CMD_STS);
+		if ((stat & 0x02) == 0x02)
+			break;
+		mdelay(10);
+	} while (--timeout);
+	if (!timeout)
+		DRM_DEBUG("timeout!\n");
 
-	wait_for_completion_timeout(&dsi->direct_cmd_comp,
-					msecs_to_jiffies(1000));
-
-	sts = readl(dsi->regs + DIRECT_CMD_STS);
-	writel(wait, dsi->regs + DIRECT_CMD_STS_CLR);
-	writel(0, dsi->regs + DIRECT_CMD_STS_CTL);
-
-	writel(readl(dsi->regs + MCTL_MAIN_DATA_CTL) & ~ctl,
-		   dsi->regs + MCTL_MAIN_DATA_CTL);
-
-	/* We did not receive the events we were waiting for. */
-	if (!(sts & wait)) {
-		ret = -ETIMEDOUT;
-		goto out;
-	}
-
-	/* 'READ' or 'WRITE with ACK' failed. */
-	if (sts & (READ_COMPLETED_WITH_ERR | ACK_WITH_ERR_RCVD)) {
-		ret = -EIO;
-		goto out;
-	}
-
-	for (i = 0; i < rx_len; i += 4) {
-		u8 *buf = msg->rx_buf;
-		int j;
-
-		val = readl(dsi->regs + DIRECT_CMD_RDDATA);
-		for (j = 0; j < 4 && j + i < rx_len; j++)
-			buf[i + j] = val >> (8 * j);
-	}
+	stat_88 = readl(dsi->regs + DIRECT_CMD_STS);
+	stat_188 = readl(dsi->regs + MCTL_DPHY_ERR_FLAG);
+	stat_88_ack_val = stat_88 >> 16;
+	if (stat_188 || stat_88_ack_val)
+		dev_dbg(host->dev, "stat: [188h] %08x, [88h] %08x\r\n", stat_188, stat_88);
 
 out:
 	pm_runtime_put(host->dev);
@@ -1472,22 +1380,62 @@ static const struct mipi_dsi_host_ops cdns_dsi_ops = {
 	.transfer = cdns_dsi_transfer,
 };
 
-static int __maybe_unused cdns_dsi_resume(struct device *dev)
+
+
+#ifdef CONFIG_PM_SLEEP
+static int cdns_dsi_system_pm_suspend(struct device *dev)
 {
-	return 0;
+	return pm_runtime_force_suspend(dev);
 }
 
-static int __maybe_unused cdns_dsi_suspend(struct device *dev)
+static int cdns_dsi_system_pm_resume(struct device *dev)
+{
+	return pm_runtime_force_resume(dev);
+}
+#endif
+
+static int cdns_dsi_runtime_resume(struct device *dev)
 {
 	struct cdns_dsi *dsi = dev_get_drvdata(dev);
+	int ret;
 
-	dsi->link_initialized = false;
+	ret = cdns_dsi_clock_enable(dsi, dsi->base.dev);
+	if (ret) {
+		dev_err(dsi->base.dev, "failed to enable clock\n");
+		return ret;
+	}
+	enable_irq(dsi->irq);
+
+	ret = cdns_dsi_resets_deassert(dsi, dsi->base.dev);
+	if (ret < 0) {
+		dev_err(dsi->base.dev, "failed to deassert reset\n");
+		return ret;
+	}
+
 	return 0;
 }
 
-static UNIVERSAL_DEV_PM_OPS(cdns_dsi_pm_ops, cdns_dsi_suspend, cdns_dsi_resume,
-			    NULL);
+static int cdns_dsi_runtime_suspend(struct device *dev)
+{
+	struct cdns_dsi *dsi = dev_get_drvdata(dev);
+	int ret;
 
+	ret = cdns_dsi_resets_assert(dsi, dsi->base.dev);
+	if (ret < 0)
+		dev_err(dsi->base.dev, "failed to assert reset\n");
+
+	cdns_dsi_clock_disable(dsi);
+
+	dsi->link_initialized = false;
+	disable_irq(dsi->irq);
+
+	return 0;
+}
+
+static const struct dev_pm_ops cdns_dsi_pm_ops = {
+	SET_RUNTIME_PM_OPS(cdns_dsi_runtime_suspend, cdns_dsi_runtime_resume, NULL)
+	SET_LATE_SYSTEM_SLEEP_PM_OPS(cdns_dsi_system_pm_suspend, cdns_dsi_system_pm_resume)
+};
 
 static int cdns_check_register_access(struct cdns_dsi* dsi)
 {
@@ -1515,7 +1463,7 @@ static int cdns_dsi_drm_probe(struct platform_device *pdev)
 	struct cdns_dsi *dsi;
 	struct cdns_dsi_input *input;
 	struct resource *res;
-	int ret, irq;
+	int ret;
 	u32 val;
 
 	dsi = devm_kzalloc(&pdev->dev, sizeof(*dsi), GFP_KERNEL);
@@ -1533,6 +1481,8 @@ static int cdns_dsi_drm_probe(struct platform_device *pdev)
 
 	ret = cdns_dsi_get_clock(&pdev->dev, dsi);//get clock res
 
+	dev_info(&pdev->dev, "dsi_sys_clk = %ld\n", clk_get_rate(dsi->dsi_sys_clk));
+
 	ret = cdns_dsi_get_reset(&pdev->dev, dsi);//get reset res
 
 	ret = cdns_dsi_clock_enable(dsi, &pdev->dev);
@@ -1546,10 +1496,10 @@ static int cdns_dsi_drm_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-    irq = platform_get_irq(pdev, 0);
-		if (irq < 0){
+	dsi->irq = platform_get_irq(pdev, 0);
+		if (dsi->irq < 0) {
 			dev_err(&pdev->dev, "---get irq error\n");
-            return irq;
+			return dsi->irq;
 	}
 
 	dsi->dphy = devm_phy_get(&pdev->dev, "dphy");
@@ -1565,9 +1515,9 @@ static int cdns_dsi_drm_probe(struct platform_device *pdev)
 	}
 
 	ret = cdns_check_register_access(dsi);
-    if (ret) {
-        dev_err(&pdev->dev, "error: r/w test generic reg failed\n");
-        goto ERROR;
+	if (ret) {
+		dev_err(&pdev->dev, "rw test generic reg failed\n");
+		goto ERROR;
     }
 
 	val = readl(dsi->regs + IP_CONF);
@@ -1595,11 +1545,13 @@ static int cdns_dsi_drm_probe(struct platform_device *pdev)
 	writel(0, dsi->regs + TVG_STS_CTL);
 	writel(0, dsi->regs + DPI_IRQ_EN);
 
-	ret = devm_request_irq(&pdev->dev, irq, cdns_dsi_interrupt, 0,
+	ret = devm_request_irq(&pdev->dev, dsi->irq, cdns_dsi_interrupt, 0,
                                dev_name(&pdev->dev), dsi);
-    if (ret){
+
+	if (ret)
 		goto err_disable_pclk;
-	}
+
+	disable_irq(dsi->irq);
 
 	pm_runtime_enable(&pdev->dev);
 	dsi->base.dev = &pdev->dev;
@@ -1609,6 +1561,12 @@ static int cdns_dsi_drm_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_disable_runtime_pm;
 
+	ret = cdns_dsi_resets_assert(dsi, dsi->base.dev);
+	if (ret < 0)
+		dev_err(dsi->base.dev, "failed to assert reset\n");
+	cdns_dsi_clock_disable(dsi);
+
+	dev_err(&pdev->dev, "starfive dsi bind end\n");
 	return 0;
 
 err_disable_runtime_pm:
